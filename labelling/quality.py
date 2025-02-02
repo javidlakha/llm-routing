@@ -2,28 +2,24 @@
 Uses GPT-4o Mini to evaluate the quality of Llama 3.2 Instruct (1B) and Llama 3.1 Instruct (70B) responses.
 """
 
+import functools
 import json
 import os
 import random
-from pathlib import Path
-from typing import Any
 
 import openai
 import tenacity
 import asyncio
 from tqdm.asyncio import tqdm as tqdm_asyncio
 
-JSONType = dict[str, Any] | list[Any] | str | int | float | bool | None
-
 JOB_ID = os.getenv("SLURM_JOB_ID", random.randint(0, 2**31 - 1))
 NUM_CPU = os.cpu_count()
 INPUT_SEED = 4013284336
+INPUT_DATASET = "datasets/dataset.jsonl"
 MAX_COMPLETION_TOKENS = 1
 MAX_INPUT_TOKENS = 512
 MODEL = "gpt-4o-mini-2024-07-18"
-TRAINING_SET = "datasets/training_set.jsonl"
-TEST_SET = "datasets/test_set.jsonl"
-OUTPUT_DIRECTORY = Path(f"outputs/quality-labels-{JOB_ID}")
+OUTPUT_DATASET = "datasets/dataset_labelled.jsonl"
 TEMPERATURE = 0.7
 TOP_P = 1
 RATE_LIMIT = 3_000
@@ -77,21 +73,27 @@ openai_client = openai.OpenAI()
 semaphore = asyncio.Semaphore(RATE_LIMIT)
 
 
+def to_thread(func, *args, **kwargs):
+    """Run a blocking function in a separate thread and return an awaitable."""
+    loop = asyncio.get_running_loop()
+    return loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
+
+
 @tenacity.retry(
     wait=tenacity.wait_exponential(),
     stop=tenacity.stop_after_attempt(RETRY_ATTEMPTS),
     retry=tenacity.retry_if_exception_type(openai.OpenAIError),
 )
 async def call_openai_api(
-    client: openai.OpenAI,
-    prompt: str,
-) -> tuple[str, dict[str, int]]:
+    client,
+    prompt,
+):
     """
     Calls the OpenAI API. Retries if the request fails or does not meet our
     standard, with exponential backoff.
     """
     async with semaphore:
-        response = await asyncio.to_thread(
+        response = await to_thread(
             client.chat.completions.create,
             messages=[{"role": "system", "content": prompt}],
             model=MODEL,
@@ -107,7 +109,7 @@ async def call_openai_api(
     stop=tenacity.stop_after_attempt(RETRY_ATTEMPTS),
     retry=tenacity.retry_if_exception_type(ValueError),
 )
-async def _evaluate_example(example: JSONType) -> JSONType:
+async def _evaluate_example(example):
     """
     Evaluates an LLM response. Requires the evaluation to be an integer in the
     set {1, 2, 3, 4, 5}.
@@ -129,7 +131,7 @@ async def _evaluate_example(example: JSONType) -> JSONType:
     return example
 
 
-async def evaluate_example(example: JSONType) -> JSONType:
+async def evaluate_example(example):
     try:
         example = await _evaluate_example(example)
     except tenacity.RetryError:
@@ -141,7 +143,7 @@ async def evaluate_example(example: JSONType) -> JSONType:
 async def main() -> None:
     # Load and evaluates the quality of responses in the training set
     dataset = []
-    with open(TRAINING_SET, "r") as f:
+    with open(INPUT_DATASET, "r") as f:
         for l in f:
             j = json.loads(l)
             dataset.append(j)
@@ -150,32 +152,12 @@ async def main() -> None:
     for example in dataset:
         task = evaluate_example(example)
         tasks.append(task)
-    results = await tqdm_asyncio.gather(*tasks, total=len(tasks))
-    results = [r for r in results if r]
+    dataset_labelled = await tqdm_asyncio.gather(*tasks, total=len(tasks))
 
-    with open("server/datasets/training_set_4omini.jsonl", "w") as f:
-        for datum in dataset:
-            f.write(json.dumps(datum) + "\n")
-
-    # Load and evaluates the quality of responses in the test set
-    dataset = []
-    with open(TEST_SET, "r") as f:
-        for l in f:
-            j = json.loads(l)
-            dataset.append(j)
-
-    # Evaluates the quality of responses in the test set
-    tasks = []
-    for example in dataset:
-        task = evaluate_example(example)
-        tasks.append(task)
-    results = await tqdm_asyncio.gather(*tasks, total=len(tasks))
-    results = [r for r in results if r]
-
-    with open("server/datasets/test_set_4omini.jsonl", "w") as f:
-        for datum in dataset:
-            f.write(json.dumps(datum) + "\n")
-
+    with open(OUTPUT_DATASET, "w") as f:
+        for datum in dataset_labelled:
+            if dataset_labelled:
+                f.write(json.dumps(datum) + "\n")
 
 if __name__ == "__main__":
     asyncio.run(main())

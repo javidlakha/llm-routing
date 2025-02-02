@@ -40,7 +40,7 @@ LLAMA_70B_URL = "http://localhost:8001/v1"
 LLAMA_70B_QUALITY_PREDICTOR = "models/quality-predictor-70b"
 LLAMA_70B_LENGTH_PREDICTOR = "models/length-predictor-70b"
 
-DATASET = Path("datasets/test_set.jsonl")
+DATASET = Path("datasets/subset_labelled.jsonl")
 OUTPUTS = Path(f"outputs/experiment-{JOB_ID}")
 
 MAX_LENGTH = 512
@@ -299,6 +299,8 @@ async def run_experiment(
         "target_load": target_load,
         "load_weight": load_weight,
         "learning_rate": learning_rate,
+        "quality_predictor": quality_predictor,
+        "token_predictor": token_predictor,
     }
     # Log experiment to Weights and Biases
     wandb.init(
@@ -312,7 +314,10 @@ async def run_experiment(
     # Prepare dataset
     logger.info("Loading dataset")
     dataset = list(load_jsonl(str(DATASET)))
-    random.shuffle(dataset)
+    
+    # Dataset is already shuffled, we want consistency across experiments
+    #random.shuffle(dataset)
+    
     dataset = dataset[:subset]
 
     # Load models
@@ -384,7 +389,7 @@ async def run_experiment(
         if llama_70b_load <= load_target:
             load_error = 0
         else:
-            load_error = (llama_70b_load - load_target) / load_target
+            load_error = (llama_70b_load - load_target) / (load_target + 1e-6)
         error = cost_weight * cost_error + load_weight * load_error
 
         # Adjust threshold
@@ -560,21 +565,22 @@ async def run_experiment(
 if __name__ == "__main__":
     run_idx = 0
 
-    for target_cost in [0, 0.25, 0.5, 0.75, 1.0]:
-        for target_load in [1_024, 2_048, 4_096]:
-            asyncio.run(
-                run_experiment(
-                    dataset_path=DATASET,
-                    subset=10_000,
-                    arrival_rate=1,
-                    target_cost=target_cost,
-                    cost_weight=1,
-                    target_load=target_load,
-                    load_weight=1,
-                    quality_predictor="distilbert",
-                    token_predictor="distilbert",
-                    learning_rate=0.05,
-                    run_identifier=f"{JOB_ID}-{run_idx}",
+    for target_cost in [0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 0.1, 0.3, 0.5, 0.7, 0.9]:
+        for target_load in [0, 2_000, 4_000, 6_000, 8_000, 10_000, 1_000, 3_000, 5_000, 7_000, 9_000]:
+            for quality_predictor in ["perfect", "random"]:
+                asyncio.run(
+                    run_experiment(
+                        dataset_path=DATASET,
+                        subset=100,
+                        arrival_rate=1,
+                        target_cost=target_cost,
+                        cost_weight=1,
+                        target_load=target_load,
+                        load_weight=1,
+                        quality_predictor=quality_predictor,
+                        token_predictor="perfect",
+                        learning_rate=0.1,
+                        run_identifier=f"{JOB_ID}-{run_idx}",
+                    )
                 )
-            )
-            run_idx += 1
+                run_idx += 1
